@@ -19,13 +19,19 @@
 #   opc_UMAP.tsv, nonda_UMAP.tsv      cell-type specificity. Skipped with a warning if absent.
 #   METADATA_PD.tsv (.gz ok)          donor + diagnosis per nucleus
 #
-# OUTPUT (small - these are what you send back):
-#   pseudobulk_counts.csv.gz          genes x (donor_cellclass) counts
-#   pseudobulk_groups.csv             group definitions + nuclei counts
+# OUTPUT:
+#   pseudobulk_counts.csv.gz          genes x (donor|class) counts, full depth
+#   pseudobulk_groups.csv             every group: donor, class, nuclei, seed
 #   pseudobulk_log.txt                run log
+#   s6_depthmatched_counts.rds        S-6: comparator classes downsampled to T
+#                                     nuclei per donor, 20 fixed seeds (plan 6.6)
+#   da_nuclei_counts.rds              S-1: nucleus-level counts for every DA
+#                                     neuron, so resampling can be repeated
+#                                     in the analysis script (plan 6.6)
 #
 # RUN:  Rscript 01_pseudobulk_kamath.R
-# TIME: 20-60 minutes. Progress prints as it goes. Leave it running.
+# TIME: roughly 30-90 minutes. Progress prints as it goes. Leave it running.
+# NEEDS: R with the Matrix package (included with every standard R install).
 # =============================================================================
 
 t_start <- Sys.time()
@@ -86,6 +92,35 @@ for (cls in names(optional)) {
     log_msg("Loaded ", f, ": ", nrow(x), " nuclei")
   } else log_msg("WARNING: ", f, " not found - S-6 will lack ", cls)
 }
+# ---- S-6 depth-matched comparator groups (plan 6.6) ------------------------
+# Each comparator class is downsampled per donor to T nuclei (T = 201, the
+# median DA count among included PD donors; plan 6.6). Donors with <= T nuclei
+# are kept whole. 20 fixed seeds; order is made deterministic by sorting.
+T_DEPTH   <- 201L
+N_SEED_S6 <- 20L
+SEED_BASE <- 20260925L
+s6_classes <- intersect(c("NONDA_all", "MG_all", "ASTRO_all", "OLIG_all", "OPC_all"),
+                        unique(ann$class))
+base <- ann[ann$class %in% s6_classes, ]
+keys <- sort(unique(paste(base$donor, base$class, sep = "|")))
+by_key <- split(base$NAME, paste(base$donor, base$class, sep = "|"))
+s6 <- vector("list", N_SEED_S6 * length(keys)); i <- 0L
+for (sd in seq_len(N_SEED_S6)) {
+  set.seed(SEED_BASE + sd)
+  for (k in keys) {
+    nm   <- sort(by_key[[k]])
+    pick <- if (length(nm) > T_DEPTH) sample(nm, T_DEPTH) else nm
+    dc   <- strsplit(k, "|", fixed = TRUE)[[1]]
+    ref  <- base[match(pick[1], base$NAME), ]
+    i <- i + 1L
+    s6[[i]] <- data.frame(NAME = pick, donor = dc[1], status = ref$status,
+                          class = sprintf("S6_%s_T%d_s%02d", dc[2], T_DEPTH, sd))
+  }
+}
+ann <- rbind(ann, do.call(rbind, s6))
+log_msg("S-6 depth-matched groups: ", length(keys) * N_SEED_S6,
+        " (", length(s6_classes), " classes x ", N_SEED_S6, " seeds; T = ", T_DEPTH, ")")
+
 ann$group <- paste(ann$donor, ann$class, sep = "|")
 
 log_msg("Annotated nuclei: DA = ", nrow(da), ", MG = ", sum(!is_macro),
@@ -145,6 +180,12 @@ if (n_row == length(genes) && n_col == length(bcd)) {
        "; genes ", length(genes), "; barcodes ", length(bcd))
 }
 
+# ---- S-1: collect nucleus-level counts for every DA neuron ------------------
+da_col  <- match(da$NAME, bcd)
+da_map  <- integer(length(bcd)); da_map[da_col[!is.na(da_col)]] <- seq_len(sum(!is.na(da_col)))
+da_keep <- da[!is.na(da_col), ]
+da_i <- list(); da_j <- list(); da_x <- list()
+
 acc <- matrix(0, nrow = length(genes), ncol = n_groups)
 CHUNK <- 5e6
 done <- 0; kept <- 0
@@ -159,6 +200,12 @@ repeat {
   x <- m[, 3]
 
   kept <- kept + sum(col2grp[cl, 1] > 0L)
+  dsel <- da_map[cl] > 0L                                # S-1 nucleus-level export
+  if (any(dsel)) {
+    da_i[[length(da_i) + 1L]] <- g[dsel]
+    da_j[[length(da_j) + 1L]] <- da_map[cl[dsel]]
+    da_x[[length(da_x) + 1L]] <- as.integer(x[dsel])
+  }
   for (k in seq_len(K)) {                      # add each entry to EVERY group
     grp  <- col2grp[cl, k]
     keep <- grp > 0L
@@ -176,17 +223,37 @@ close(con)
 
 # ---- 5. Write outputs -------------------------------------------------------
 dimnames(acc) <- list(genes, groups)
-acc <- acc[rowSums(acc) > 0, , drop = FALSE]     # drop all-zero genes
-log_msg("Pseudobulk: ", nrow(acc), " genes x ", ncol(acc), " groups")
+is_s6 <- grepl("\\|S6_", groups)
 
-gz <- gzfile("pseudobulk_counts.csv.gz", "w")
-write.csv(acc, gz); close(gz)
+main <- acc[, !is_s6, drop = FALSE]
+main <- main[rowSums(main) > 0, , drop = FALSE]
+log_msg("Main pseudobulk: ", nrow(main), " genes x ", ncol(main), " groups")
+gz <- gzfile("pseudobulk_counts.csv.gz", "w"); write.csv(main, gz); close(gz)
+
+if (any(is_s6)) {
+  s6m <- Matrix::Matrix(acc[, is_s6, drop = FALSE], sparse = TRUE)
+  saveRDS(s6m, "s6_depthmatched_counts.rds", compress = "xz")
+  log_msg("S-6 depth-matched pseudobulk: ", ncol(s6m), " groups saved")
+}
+rm(acc); invisible(gc())
+
+da_mat <- Matrix::sparseMatrix(i = unlist(da_i), j = unlist(da_j), x = unlist(da_x),
+                               dims = c(length(genes), nrow(da_keep)),
+                               dimnames = list(genes, da_keep$NAME))
+saveRDS(list(counts = da_mat,
+             nuclei = data.frame(NAME = da_keep$NAME, donor = da_keep$donor_id,
+                                 status = da_keep$Status, subtype = da_keep$Cell_Type,
+                                 family = da_keep$family)),
+        "da_nuclei_counts.rds", compress = "xz")
+log_msg("DA nucleus-level matrix: ", ncol(da_mat), " nuclei, ",
+        format(length(da_mat@x), big.mark = ","), " non-zero entries")
 
 gi <- unique(ann[, c("group", "donor", "status", "class")])
 nn <- as.data.frame(table(ann$group)); names(nn) <- c("group", "n_nuclei")
 gi <- merge(gi, nn, by = "group")
+gi$seed <- ifelse(grepl("^S6_", gi$class), as.integer(sub(".*_s", "", gi$class)), NA)
 write.csv(gi[order(gi$class, gi$status, gi$donor), ],
           "pseudobulk_groups.csv", row.names = FALSE)
 
 log_msg("DONE in ", round(difftime(Sys.time(), t_start, units = "mins"), 1), " min")
-log_msg("Send back: pseudobulk_counts.csv.gz, pseudobulk_groups.csv, pseudobulk_log.txt")
+log_msg("Keep all outputs. Send back: pseudobulk_groups.csv and pseudobulk_log.txt")
