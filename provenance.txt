@@ -1,0 +1,7 @@
+generated: 2026-09-25 23:21:46.075345
+R: R version 4.6.1 (2026-06-24)
+msigdbr: 26.1.1
+alpha: 97 | gamma: 200 | shared: 73 | alpha_only: 24 | gamma_minus_alpha: 127 | AxisE (minus core20): 122 | AxisB_excl: 93
+REACTOME set: REACTOME_INTERFERON_ALPHA_BETA_SIGNALING (n = 78 )
+KEGG lysosome set: KEGG_LYSOSOME (n = 121 )
+Curated axes (A, A1-3, A-gamma, C1, C2, D, mito, lyso extras) are hand-specified here.
