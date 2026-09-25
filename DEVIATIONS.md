@@ -10,4 +10,4 @@ Every change made **after** that commit is recorded below, with:
 
 | Date | Change | Reason | Before or after seeing the relevant result? |
 |---|---|---|---|
-| — | No deviations yet | — | — |
+| 25 Sep 2026 | S-6 depth matching uses 20 fixed random draws (seeds 20260926–20260945) | The plan fixed the depth (T = 201) but not the number of draws; 20 keeps memory within a 16 GB laptop. S-1 keeps its pre-registered 100 | Before — no expression data loaded |
